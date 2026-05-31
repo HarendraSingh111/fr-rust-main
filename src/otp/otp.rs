@@ -1,0 +1,49 @@
+use crate::prelude::{CryptoService, RedisManager};
+use rand::{rngs::OsRng, RngCore};
+
+pub struct OtpConfig {
+    pub secret: String,
+    pub crypto: CryptoService,
+    pub redis: RedisManager,
+    pub ttl_secs: u64,
+}
+
+pub struct OtpService {
+    config: OtpConfig,
+}
+
+impl OtpService {
+    pub fn new(config: OtpConfig) -> Self {
+        Self { config }
+    }
+    pub async fn generate_otp(&self, user_id: &str, digits: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let otp = Self::random_digits(digits);
+        let content_to_hash = format!("{}:{}", self.config.secret, otp);
+        let hash = self.config.crypto.sha256_hash(&content_to_hash)?.hash;
+        let redis_key = format!("otp:{}", user_id);
+        self.config.redis.set_ttl(&redis_key, &hash, self.config.ttl_secs).await?;
+        Ok(otp)
+    }
+    pub async fn verify_otp(&self, user_id: &str, otp: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let redis_key = format!("otp:{}", user_id);
+        let stored_hash: Option<String> = self.config.redis.get(&redis_key).await?;
+        let hash_to_check = match stored_hash {
+            Some(h) => h,
+            None => return Ok(false),
+        };
+        let content_to_hash = format!("{}:{}", self.config.secret, otp);
+        let calculated_hash = self.config.crypto.sha256_hash(&content_to_hash)?.hash;
+        let ok = calculated_hash == hash_to_check;
+        if ok {
+            self.config.redis.del(&redis_key).await?;
+        }
+        Ok(ok)
+    }
+    fn random_digits(digits: u32) -> String {
+        let mut bytes = [0u8; 8];
+        OsRng.fill_bytes(&mut bytes);
+        let num = u64::from_le_bytes(bytes);
+        let otp = num % 10u64.pow(digits);
+        format!("{:0width$}", otp, width = digits as usize)
+    }
+}
